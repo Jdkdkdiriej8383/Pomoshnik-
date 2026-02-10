@@ -79,7 +79,7 @@ def get_teacher_kb():
 def get_approval_kb(user_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="✅ Согласить", callback_data=f"approve_{user_id}"),
+            InlineKeyboardButton(text="✅ Принять", callback_data=f"approve_{user_id}"),
             InlineKeyboardButton(text="❌ Отклонить", callback_data=f"decline_{user_id}")
         ]
     ])
