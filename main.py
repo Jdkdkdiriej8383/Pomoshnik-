@@ -34,7 +34,6 @@ cursor = conn.cursor()
 
 # === Таблицы ===
 
-# Пользователи
 cursor.execute('''
     CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
@@ -44,7 +43,6 @@ cursor.execute('''
     )
 ''')
 
-# Список дежурных
 cursor.execute('''
     CREATE TABLE IF NOT EXISTS duty_roster (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -52,7 +50,6 @@ cursor.execute('''
     )
 ''')
 
-# Сообщение о дежурстве
 cursor.execute('''
     CREATE TABLE IF NOT EXISTS duty_message (
         id INTEGER PRIMARY KEY,
@@ -60,7 +57,6 @@ cursor.execute('''
     )
 ''')
 
-# Настройки
 cursor.execute('''
     CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
@@ -68,7 +64,6 @@ cursor.execute('''
     )
 ''')
 
-# Посещаемость по дням
 cursor.execute('''
     CREATE TABLE IF NOT EXISTS attendance (
         user_id INTEGER,
@@ -79,6 +74,8 @@ cursor.execute('''
     )
 ''')
 
+# Инициализация канала по умолчанию
+cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('channel', ?)", (CHANNEL_ID,))
 conn.commit()
 
 # === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
@@ -476,7 +473,7 @@ async def prompt_duty_name(message: types.Message, state: FSMContext):
     if not bot_active:
         await message.answer("🔴 Бот остановлен.", reply_markup=get_teacher_kb())
         return
-    await message.answer("✏️ Введите имя:")
+    await message.answer("✏️ Введите имя нового дежурного:")
     await state.set_state(Registration.awaiting_duty_name)
 
 @dp.message(Registration.awaiting_duty_name)
@@ -485,14 +482,39 @@ async def set_duty(message: types.Message, state: FSMContext):
         await message.answer("🔴 Бот остановлен.", reply_markup=get_teacher_kb())
         await state.clear()
         return
+
     name = message.text.strip()
     cursor.execute("SELECT user_id FROM users WHERE name=? AND approved=1", (name,))
     row = cursor.fetchone()
-    if row:
-        await bot.send_message(row[0], "🧹 Вы назначены дежурным!")
-        await message.answer(f"🧹 {name} назначен дежурным.")
-    else:
+
+    if not row:
         await message.answer("❌ Ученик не найден.")
+        await state.clear()
+        return
+
+    user_id = row[0]
+    msg_text = f"🧹 Дежурства на сегодня:\nДежурит: {name}"
+
+    msg_id = get_duty_message_id()
+    try:
+        if msg_id:
+            await bot.edit_message_text(
+                chat_id=current_channel,
+                message_id=msg_id,
+                text=msg_text
+            )
+        else:
+            sent = await bot.send_message(current_channel, msg_text)
+            save_duty_message_id(sent.message_id)
+    except Exception as e:
+        await bot.send_message(TEACHER_ID, f"⚠️ Не удалось обновить канал: {e}")
+
+    try:
+        await bot.send_message(user_id, "🧹 Вам назначен статус дежурного! Не забудьте отчитаться.")
+    except Exception as e:
+        await bot.send_message(TEACHER_ID, f"⚠️ Не удалось оповестить {name}: {e}")
+
+    await message.answer(f"✅ Дежурный назначен: <b>{name}</b>", parse_mode="HTML")
     await state.clear()
 
 @dp.message(F.text == "🗑️ Удалить ученика")
@@ -591,6 +613,7 @@ async def teacher_help(message: types.Message):
 /start — запуск  
 /attendance — посещаемость  
 /reset_duty_list — сброс очереди  
+/set_channel — изменить канал  
 /help — это сообщение
 
 Кнопки:
@@ -636,7 +659,36 @@ async def cmd_next_duty(message: types.Message):
     status_text = " ✅ придёт" if row and row[0] == "present" else " ❌ не придёт"
     await message.answer(f"➡️ Следующий: <b>{next_name}</b>{status_text}", parse_mode="HTML")
 
+# === КОМАНДА /set_channel — теперь есть! ===
+@dp.message(Command("set_channel"))
+async def set_channel(message: types.Message):
+    if message.from_user.id != TEACHER_ID:
+        return
+
+    args = message.text.split(maxsplit=1)
+    if len(args) != 2:
+        await message.answer(
+            "📌 Используйте: <code>/set_channel @название_канала</code>\n"
+            "Пример: <code>/set_channel @my_school_duty</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    new_channel = args[1].strip()
+
+    if not (new_channel.startswith("@") or "t.me/" in new_channel):
+        await message.answer("📛 Укажите корректное имя канала, начиная с <code>@</code>", parse_mode="HTML")
+        return
+
+    global current_channel
+    current_channel = new_channel
+    save_setting("channel", current_channel)
+
+    await message.answer(f"✅ Канал изменён:\n\n<b>{current_channel}</b>", parse_mode="HTML")
+
+
 # === Ученик: Команды ===
+
 @dp.message(F.text == "✅ Приду в школу")
 async def mark_present(message: types.Message):
     if not bot_active:
@@ -676,10 +728,12 @@ async def report_duty(message: types.Message):
     cursor.execute("SELECT name FROM users WHERE user_id=?", (message.from_user.id,))
     row = cursor.fetchone()
     if not row:
-        await message.answer("❌ Не зарегистрированы.")
+        await message.answer("❌ Вы не зарегистрированы.")
         return
     name = row[0]
     await message.answer("🧹 Вы отчитались! Молодец! 💪")
+
+    # Редактируем сообщение в канале
     msg_id = get_duty_message_id()
     if msg_id:
         try:
@@ -690,11 +744,20 @@ async def report_duty(message: types.Message):
             )
         except Exception as e:
             print(f"[Ошибка редактирования] {e}")
+
+    # Перемещаем в конец очереди
     add_to_end_of_duty(name)
 
 # === ЗАПУСК БОТА ===
 async def main():
+    # Подгружаем текущий канал из БД
+    global current_channel
+    current_channel = load_setting("channel", CHANNEL_ID)
+    
+    # Запускаем планировщик
     asyncio.create_task(run_scheduler())
+    
+    # Стартуем опрос бота
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
