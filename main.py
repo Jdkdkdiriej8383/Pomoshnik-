@@ -33,7 +33,6 @@ conn = sqlite3.connect("school_bot.db", check_same_thread=False)
 cursor = conn.cursor()
 
 # === Таблицы ===
-
 cursor.execute('''
     CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
@@ -405,6 +404,7 @@ async def decline_student(callback: types.CallbackQuery):
     await callback.answer("Отклонено")
 
 # === Учитель: Команды ===
+
 @dp.message(F.text == "📋 Список класса")
 async def list_students(message: types.Message):
     if message.from_user.id != TEACHER_ID:
@@ -412,14 +412,64 @@ async def list_students(message: types.Message):
     if not bot_active:
         await message.answer("🔴 Бот остановлен.", reply_markup=get_teacher_kb())
         return
-    cursor.execute("SELECT name FROM users WHERE role='student' AND approved=1 ORDER BY name ASC")
+
+    cursor.execute("SELECT user_id, name FROM users WHERE role='student' AND approved=1 ORDER BY name ASC")
     students = cursor.fetchall()
+
     if not students:
         await message.answer("📚 Класс пуст.")
         return
-    lines = [f"{name[0]} — ✅" for name in students]
-    report = "\n".join(lines)
-    await message.answer(f"📋 Список класса:\n\n{report}")
+
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    report_lines = ["👥 Список класса:\n"]
+
+    for user_id, name in students:
+        cursor.execute("SELECT status, reason FROM attendance WHERE user_id=? AND date=?", (user_id, today_str))
+        row = cursor.fetchone()
+        if row:
+            status, reason = row
+            if status == "present":
+                line = f"{name} — ✅ идёт"
+            else:
+                reason_text = reason if reason else "не указана"
+                line = f"{name} — ❌ не идёт ({reason_text})"
+        else:
+            line = f"{name} — ✅ идёт"  # по умолчанию
+        report_lines.append(line)
+
+    full_report = "\n".join(report_lines)
+    if len(full_report) > 4096:
+        for i in range(0, len(report_lines), 25):
+            part = "\n".join(report_lines[i:i+25])
+            if part.strip():
+                await message.answer(part)
+    else:
+        await message.answer(full_report)
+
+
+@dp.message(Command("status"))
+async def cmd_status(message: types.Message):
+    if message.from_user.id != TEACHER_ID:
+        return
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    cursor.execute("SELECT name FROM users WHERE user_id IN (SELECT user_id FROM attendance WHERE date=? AND status='present') AND role='student' AND approved=1", (today_str,))
+    present = [row[0] for row in cursor.fetchall()]
+    cursor.execute("SELECT name, reason FROM users LEFT JOIN attendance ON users.user_id = attendance.user_id AND attendance.date=? WHERE attendance.status='absent' AND users.role='student' AND users.approved=1", (today_str,))
+    absent_rows = cursor.fetchall()
+    absent = [f"{name} ({reason})" for name, reason in absent_rows]
+
+    if not present and not absent:
+        await message.answer("🚫 Нет данных.")
+        return
+
+    report = "📋 Кто сегодня:\n"
+    if present:
+        report += "\n✅ Идут:\n" + "\n".join([f"• {name}" for name in present])
+    if absent:
+        report += "\n❌ Не идут:\n" + "\n".join([f"• {item}" for item in absent])
+
+    await message.answer(report)
+
 
 @dp.message(F.text == "📊 Посещаемость")
 @dp.message(Command("attendance"))
@@ -466,6 +516,7 @@ async def cmd_attendance(message: types.Message):
     else:
         await message.answer(full_report)
 
+
 @dp.message(F.text == "➕ Добавить дежурного")
 async def prompt_duty_name(message: types.Message, state: FSMContext):
     if message.from_user.id != TEACHER_ID:
@@ -475,6 +526,7 @@ async def prompt_duty_name(message: types.Message, state: FSMContext):
         return
     await message.answer("✏️ Введите имя нового дежурного:")
     await state.set_state(Registration.awaiting_duty_name)
+
 
 @dp.message(Registration.awaiting_duty_name)
 async def set_duty(message: types.Message, state: FSMContext):
@@ -517,6 +569,49 @@ async def set_duty(message: types.Message, state: FSMContext):
     await message.answer(f"✅ Дежурный назначен: <b>{name}</b>", parse_mode="HTML")
     await state.clear()
 
+
+@dp.message(Command("set_channel"))
+async def set_channel(message: types.Message):
+    if message.from_user.id != TEACHER_ID:
+        return
+
+    args = message.text.split(maxsplit=1)
+    if len(args) != 2:
+        await message.answer(
+            "📌 Используйте: <code>/set_channel @username</code> или <code>/set_channel https://t.me/+invite_link</code>\n"
+            "Примеры:\n"
+            "<code>/set_channel @my_school</code>\n"
+            "<code>/set_channel https://t.me/+ABCdefGHIjklMN</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    new_channel = args[1].strip()
+
+    if not (
+        new_channel.startswith("@") or
+        new_channel.startswith("https://t.me/+") or
+        new_channel.startswith("t.me/+") or
+        (new_channel.startswith("https://t.me/") and "/joinchat/" in new_channel)
+    ):
+        await message.answer("📛 Некорректная ссылка. Должно быть: <code>@username</code> или <code>https://t.me/+...</code>", parse_mode="HTML")
+        return
+
+    global current_channel
+    current_channel = new_channel
+    save_setting("channel", current_channel)
+
+    channel_type = "private" if "t.me/+" in new_channel else "public"
+    save_setting("channel_type", channel_type)
+
+    await message.answer(
+        f"✅ Канал изменён:\n\n<b>{current_channel}</b>\n\n"
+        "🤖 Теперь добавьте этого бота как администратора в канал.\n"
+        "После этого он сможет публиковать отчёты.",
+        parse_mode="HTML"
+    )
+
+
 @dp.message(F.text == "🗑️ Удалить ученика")
 async def prompt_delete_name(message: types.Message, state: FSMContext):
     if message.from_user.id != TEACHER_ID:
@@ -526,6 +621,7 @@ async def prompt_delete_name(message: types.Message, state: FSMContext):
         return
     await message.answer("✏️ Введите имя или <code>@all</code>:", parse_mode="HTML")
     await state.set_state(Registration.awaiting_delete_name)
+
 
 @dp.message(Registration.awaiting_delete_name)
 async def delete_student(message: types.Message, state: FSMContext):
@@ -553,6 +649,7 @@ async def delete_student(message: types.Message, state: FSMContext):
         await message.answer(f"✅ Удалён: {name}" if cursor.rowcount else "❌ Не найден.")
         await state.clear()
 
+
 @dp.callback_query(F.data == "confirm_delete_all")
 async def confirm_delete_all(callback: types.CallbackQuery, state: FSMContext):
     cursor.execute("SELECT user_id FROM users WHERE role='student'")
@@ -570,11 +667,13 @@ async def confirm_delete_all(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer("Готово")
     await state.clear()
 
+
 @dp.callback_query(F.data == "cancel_delete")
 async def cancel_delete(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text("❌ Отменено")
     await callback.answer("Отмена")
     await state.clear()
+
 
 @dp.message(F.text == "📤 Повторить отчёт в канал")
 async def resend_channel_report(message: types.Message):
@@ -586,6 +685,7 @@ async def resend_channel_report(message: types.Message):
     await assign_daily_duty()
     await message.answer("📤 Запрос отправлен.")
 
+
 @dp.message(F.text == "🔴 Стоп")
 async def stop_bot(message: types.Message):
     global bot_active
@@ -594,6 +694,7 @@ async def stop_bot(message: types.Message):
     bot_active = False
     await message.answer("🔴 Бот остановлен.", reply_markup=get_teacher_kb())
 
+
 @dp.message(F.text == "🟢 Старт")
 async def start_bot(message: types.Message):
     global bot_active
@@ -601,6 +702,7 @@ async def start_bot(message: types.Message):
         return
     bot_active = True
     await message.answer("🟢 Бот запущен.", reply_markup=get_teacher_kb())
+
 
 @dp.message(Command("help"))
 @dp.message(F.text == "ℹ️ Помощь")
@@ -612,12 +714,13 @@ async def teacher_help(message: types.Message):
 
 /start — запуск  
 /attendance — посещаемость  
+/status — кто сегодня идёт  
 /reset_duty_list — сброс очереди  
-/set_channel — изменить канал  
+/set_channel — изменить канал (работает с приватными)  
 /help — это сообщение
 
 Кнопки:
-📋 Список класса
+📋 Список класса — кто идёт/не идёт
 📊 Посещаемость
 ➕ Добавить дежурного
 🗑️ Удалить ученика
@@ -628,6 +731,7 @@ async def teacher_help(message: types.Message):
 ⏰ В 8:25 — назначается дежурный из пришедших
 """
     await message.answer(help_text, parse_mode="HTML")
+
 
 @dp.message(Command("reset_duty_list"))
 async def cmd_reset_duty_list(message: types.Message):
@@ -645,6 +749,7 @@ async def cmd_reset_duty_list(message: types.Message):
     numbered = "\n".join([f"{i+1}. {name}" for i, name in enumerate(sorted_names)])
     await message.answer(f"✅ Список сброшен к алфавиту:\n\n{numbered}")
 
+
 @dp.message(Command("next_duty"))
 async def cmd_next_duty(message: types.Message):
     if message.from_user.id != TEACHER_ID:
@@ -659,33 +764,6 @@ async def cmd_next_duty(message: types.Message):
     status_text = " ✅ придёт" if row and row[0] == "present" else " ❌ не придёт"
     await message.answer(f"➡️ Следующий: <b>{next_name}</b>{status_text}", parse_mode="HTML")
 
-# === КОМАНДА /set_channel — теперь есть! ===
-@dp.message(Command("set_channel"))
-async def set_channel(message: types.Message):
-    if message.from_user.id != TEACHER_ID:
-        return
-
-    args = message.text.split(maxsplit=1)
-    if len(args) != 2:
-        await message.answer(
-            "📌 Используйте: <code>/set_channel @название_канала</code>\n"
-            "Пример: <code>/set_channel @my_school_duty</code>",
-            parse_mode="HTML"
-        )
-        return
-
-    new_channel = args[1].strip()
-
-    if not (new_channel.startswith("@") or "t.me/" in new_channel):
-        await message.answer("📛 Укажите корректное имя канала, начиная с <code>@</code>", parse_mode="HTML")
-        return
-
-    global current_channel
-    current_channel = new_channel
-    save_setting("channel", current_channel)
-
-    await message.answer(f"✅ Канал изменён:\n\n<b>{current_channel}</b>", parse_mode="HTML")
-
 
 # === Ученик: Команды ===
 
@@ -699,6 +777,7 @@ async def mark_present(message: types.Message):
     clear_future_absent_from(user_id, today)
     await message.answer("✅ Вы отметились как 'приду'. Будущие отсутствия отменены.")
 
+
 @dp.message(F.text == "❌ Не приду")
 async def prompt_absent_reason(message: types.Message, state: FSMContext):
     if not bot_active:
@@ -706,6 +785,7 @@ async def prompt_absent_reason(message: types.Message, state: FSMContext):
         return
     await message.answer("📝 Укажите причину:")
     await state.set_state(Registration.awaiting_reason)
+
 
 @dp.message(Registration.awaiting_reason)
 async def mark_absent(message: types.Message, state: FSMContext):
@@ -719,6 +799,7 @@ async def mark_absent(message: types.Message, state: FSMContext):
     set_absent_from_date(user_id, today, reason)
     await message.answer(f"❌ Вы отмечены как 'не приду'. Причина: {reason}")
     await state.clear()
+
 
 @dp.message(F.text == "🧹 Отчитаться о дежурстве")
 async def report_duty(message: types.Message):
@@ -748,6 +829,7 @@ async def report_duty(message: types.Message):
     # Перемещаем в конец очереди
     add_to_end_of_duty(name)
 
+
 # === ЗАПУСК БОТА ===
 async def main():
     # Подгружаем текущий канал из БД
@@ -760,5 +842,7 @@ async def main():
     # Стартуем опрос бота
     await dp.start_polling(bot)
 
+
 if __name__ == "__main__":
     asyncio.run(main())
+
