@@ -232,7 +232,7 @@ def get_confirm_kb():
         ]
     ])
 
-# === Назначение дежурного в 8:25 ===
+# === Назначение дежурного в 8:25 + ОТЧЁТ УЧИТЕЛЮ ===
 async def assign_daily_duty():
     if not bot_active or is_weekend():
         return
@@ -242,6 +242,28 @@ async def assign_daily_duty():
     roster = get_duty_list()
     if not roster:
         await bot.send_message(TEACHER_ID, "⚠️ Список дежурных пуст.")
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        cursor.execute("SELECT name FROM users WHERE user_id IN (SELECT user_id FROM attendance WHERE date=? AND status='present') AND role='student' AND approved=1", (today_str,))
+        present = [row[0] for row in cursor.fetchall()]
+        cursor.execute("SELECT name, reason FROM users LEFT JOIN attendance ON users.user_id = attendance.user_id AND attendance.date=? WHERE attendance.status='absent' AND users.role='student' AND approved=1", (today_str,))
+        absent_rows = cursor.fetchall()
+        absent = [f"{name} ({reason})" for name, reason in absent_rows]
+
+        report = "📬 Ежедневный отчёт (8:25)\n\n"
+        if present:
+            report += "✅ Придут:\n" + "\n".join([f"• {name}" for name in present]) + "\n"
+        else:
+            report += "✅ Никто не пропал\n"
+        if absent:
+            report += "❌ Не придут:\n" + "\n".join([f"• {item}" for item in absent]) + "\n"
+        else:
+            report += "❌ Никто не отсутствует\n"
+
+        report += "\n🧹 Дежурит: <b>Нет</b> (список пуст)"
+        try:
+            await bot.send_message(TEACHER_ID, report, parse_mode="HTML")
+        except Exception as e:
+            print(f"[Отчёт учителю] Ошибка: {e}")
         return
 
     today_str = datetime.now().strftime("%Y-%m-%d")
@@ -254,6 +276,17 @@ async def assign_daily_duty():
             await bot.send_message(current_channel, msg)
         except Exception as e:
             await bot.send_message(TEACHER_ID, f"❌ Ошибка в канале: {e}")
+
+        report = "📬 Ежедневный отчёт (8:25)\n\n"
+        report += "✅ Придут:\n• Никто\n"
+        report += "❌ Не придут:\n• Все или данные не заполнены\n"
+        report += "\n🧹 Дежурит: <b>Нет</b> (никто не придёт)"
+
+        try:
+            await bot.send_message(TEACHER_ID, report, parse_mode="HTML")
+        except Exception as e:
+            print(f"[Отчёт учителю] Ошибка: {e}")
+
         await bot.send_message(TEACHER_ID, "🚫 Сегодня никто не приходит — дежурных нет.")
         return
 
@@ -289,6 +322,25 @@ async def assign_daily_duty():
         await bot.send_message(TEACHER_ID, f"⚠️ Не удалось оповестить {daily_duty}: {e}")
 
     await bot.send_message(TEACHER_ID, f"✅ Дежурный назначен: <b>{daily_duty}</b>", parse_mode="HTML")
+
+    # === 📬 ОТПРАВКА ПОЛНОГО ОТЧЁТА УЧИТЕЛЮ ===
+    cursor.execute("SELECT name, reason FROM users LEFT JOIN attendance ON users.user_id = attendance.user_id AND attendance.date=? WHERE attendance.status='absent' AND users.role='student' AND approved=1", (today_str,))
+    absent_rows = cursor.fetchall()
+    absent = [f"{name} ({reason})" for name, reason in absent_rows]
+
+    report = "📬 Ежедневный отчёт (8:25)\n\n"
+    report += "✅ Придут:\n" + "\n".join([f"• {name}" for name in present_names]) + "\n"
+    if absent:
+        report += "❌ Не придут:\n" + "\n".join([f"• {item}" for item in absent]) + "\n"
+    else:
+        report += "❌ Никто не отсутствует\n"
+
+    report += f"\n🧹 Дежурит: <b>{daily_duty}</b>"
+
+    try:
+        await bot.send_message(TEACHER_ID, report, parse_mode="HTML")
+    except Exception as e:
+        print(f"[Отчёт учителю] Ошибка отправки: {e}")
 
 # === Планировщик ===
 async def run_scheduler():
@@ -434,7 +486,7 @@ async def list_students(message: types.Message):
                 reason_text = reason if reason else "не указана"
                 line = f"{name} — ❌ не идёт ({reason_text})"
         else:
-            line = f"{name} — ✅ идёт"  # по умолчанию
+            line = f"{name} — ✅ идёт"
         report_lines.append(line)
 
     full_report = "\n".join(report_lines)
@@ -446,7 +498,6 @@ async def list_students(message: types.Message):
     else:
         await message.answer(full_report)
 
-
 @dp.message(Command("status"))
 async def cmd_status(message: types.Message):
     if message.from_user.id != TEACHER_ID:
@@ -454,7 +505,7 @@ async def cmd_status(message: types.Message):
     today_str = datetime.now().strftime("%Y-%m-%d")
     cursor.execute("SELECT name FROM users WHERE user_id IN (SELECT user_id FROM attendance WHERE date=? AND status='present') AND role='student' AND approved=1", (today_str,))
     present = [row[0] for row in cursor.fetchall()]
-    cursor.execute("SELECT name, reason FROM users LEFT JOIN attendance ON users.user_id = attendance.user_id AND attendance.date=? WHERE attendance.status='absent' AND users.role='student' AND users.approved=1", (today_str,))
+    cursor.execute("SELECT name, reason FROM users LEFT JOIN attendance ON users.user_id = attendance.user_id AND attendance.date=? WHERE attendance.status='absent' AND users.role='student' AND approved=1", (today_str,))
     absent_rows = cursor.fetchall()
     absent = [f"{name} ({reason})" for name, reason in absent_rows]
 
@@ -469,7 +520,6 @@ async def cmd_status(message: types.Message):
         report += "\n❌ Не идут:\n" + "\n".join([f"• {item}" for item in absent])
 
     await message.answer(report)
-
 
 @dp.message(F.text == "📊 Посещаемость")
 @dp.message(Command("attendance"))
@@ -516,7 +566,6 @@ async def cmd_attendance(message: types.Message):
     else:
         await message.answer(full_report)
 
-
 @dp.message(F.text == "➕ Добавить дежурного")
 async def prompt_duty_name(message: types.Message, state: FSMContext):
     if message.from_user.id != TEACHER_ID:
@@ -526,7 +575,6 @@ async def prompt_duty_name(message: types.Message, state: FSMContext):
         return
     await message.answer("✏️ Введите имя нового дежурного:")
     await state.set_state(Registration.awaiting_duty_name)
-
 
 @dp.message(Registration.awaiting_duty_name)
 async def set_duty(message: types.Message, state: FSMContext):
@@ -568,7 +616,6 @@ async def set_duty(message: types.Message, state: FSMContext):
 
     await message.answer(f"✅ Дежурный назначен: <b>{name}</b>", parse_mode="HTML")
     await state.clear()
-
 
 @dp.message(Command("set_channel"))
 async def set_channel(message: types.Message):
@@ -728,7 +775,7 @@ async def teacher_help(message: types.Message):
 🔴 Стоп / 🟢 Старт
 ℹ️ Помощь
 
-⏰ В 8:25 — назначается дежурный из пришедших
+⏰ В 8:25 — назначается дежурный + приходит отчёт учителю
 """
     await message.answer(help_text, parse_mode="HTML")
 
